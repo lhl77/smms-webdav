@@ -1,4 +1,4 @@
-# 📁 smms-webdav
+# 📁 SMMS-WebDav
 
 > 将 [sm.ms](https://sm.ms) 图床伪装成 WebDAV 存储服务 —— 支持 AList、RaiDrive、Windows/macOS 挂载！
 
