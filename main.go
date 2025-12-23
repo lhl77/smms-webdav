@@ -500,12 +500,15 @@ func main() {
 	}
 
 	authHandler := func(w http.ResponseWriter, r *http.Request) {
-		if config.Username != "" {
-			user, pass, ok := r.BasicAuth()
-			if !ok || user != config.Username || pass != config.Password {
-				w.Header().Set("WWW-Authenticate", `Basic realm="sm.ms WebDAV"`)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
+		// 允许 GET、HEAD、OPTIONS 无需认证（图片可公开访问）
+		if r.Method != "GET" && r.Method != "HEAD" && r.Method != "OPTIONS" {
+			if config.Username != "" {
+				user, pass, ok := r.BasicAuth()
+				if !ok || user != config.Username || pass != config.Password {
+					w.Header().Set("WWW-Authenticate", `Basic realm="sm.ms WebDAV"`)
+					http.Error(w, "Unauthorized", http.StatusUnauthorized)
+					return
+				}
 			}
 		}
 		webdavHandler(w, r)
