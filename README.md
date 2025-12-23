@@ -15,7 +15,7 @@
 - 🔒 **可选 Basic Auth 认证**：保护你的 WebDAV 服务
 - 🔄 **GET 自动 302 重定向**：访问文件时跳转到真实 sm.ms 地址
 - 🧪 **兼容主流客户端**：
-  - [AList](https://alist.nn.ci/)
+  - [AList](https://alist.nn.ci/)/OpenList
   - RaiDrive / Cyberduck / Windows 映射网络驱动器
   - macOS Finder “连接服务器”
 
