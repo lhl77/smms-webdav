@@ -35,11 +35,12 @@ type Config struct {
 }
 
 type FileInfo struct {
-	Hash     string    `json:"hash"`
-	Path     string    `json:"path"`
-	URL      string    `json:"url"`
-	Size     int64     `json:"size"`
-	Modified time.Time `json:"modified"`
+	Hash         string    `json:"hash"`
+	Path         string    `json:"path"`          // CDN path (主键)
+	OriginalPath string    `json:"original_path"` // 新增字段
+	URL          string    `json:"url"`
+	Size         int64     `json:"size"`
+	Modified     time.Time `json:"modified"`
 }
 
 var (
@@ -87,27 +88,35 @@ func initDB() error {
 		return fmt.Errorf("open db: %w", err)
 	}
 
+	// ✅ 使用 IF NOT EXISTS 避免重复创建
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS files (
 			path TEXT PRIMARY KEY,
+			original_path TEXT,
 			hash TEXT NOT NULL,
 			url TEXT NOT NULL,
 			size INTEGER NOT NULL,
 			modified TEXT NOT NULL
-		)
+		);
 	`)
-	return err
+	if err != nil {
+		return fmt.Errorf("create table: %w", err)
+	}
+
+	return nil
 }
 
 func saveFile(info *FileInfo) error {
 	modifiedStr := info.Modified.Format(time.RFC3339)
 	_, err := db.Exec(
-		"INSERT OR REPLACE INTO files (path, hash, url, size, modified) VALUES (?, ?, ?, ?, ?)",
-		info.Path, info.Hash, info.URL, info.Size, modifiedStr,
+		"INSERT OR REPLACE INTO files (path, original_path, hash, url, size, modified) VALUES (?, ?, ?, ?, ?, ?)",
+		info.Path, info.OriginalPath, info.Hash, info.URL, info.Size, modifiedStr,
 	)
 	return err
 }
 
+// ------------------ DB Helpers ------------------
+// 原有的 getFile 保持不变（按 CDN path 查询）
 func getFile(path string) (*FileInfo, error) {
 	row := db.QueryRow("SELECT hash, url, size, modified FROM files WHERE path = ?", path)
 	var info FileInfo
@@ -124,13 +133,29 @@ func getFile(path string) (*FileInfo, error) {
 	return &info, nil
 }
 
+// ✅ 按 original_path 查询
+func getFileByOriginalPath(originalPath string) (*FileInfo, error) {
+	row := db.QueryRow("SELECT path, original_path, hash, url, size, modified FROM files WHERE original_path = ?", originalPath)
+	var info FileInfo
+	var modifiedStr string
+	err := row.Scan(&info.Path, &info.OriginalPath, &info.Hash, &info.URL, &info.Size, &modifiedStr)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	info.Modified, _ = time.Parse(time.RFC3339, modifiedStr)
+	return &info, nil
+}
+
 func deleteFile(path string) error {
 	_, err := db.Exec("DELETE FROM files WHERE path = ?", path)
 	return err
 }
 
 func listAllFiles() ([]FileInfo, error) {
-	rows, err := db.Query("SELECT path, hash, url, size, modified FROM files ORDER BY path")
+	rows, err := db.Query("SELECT path, original_path, hash, url, size, modified FROM files ORDER BY original_path")
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +165,7 @@ func listAllFiles() ([]FileInfo, error) {
 	for rows.Next() {
 		var f FileInfo
 		var modifiedStr string
-		if err := rows.Scan(&f.Path, &f.Hash, &f.URL, &f.Size, &modifiedStr); err != nil {
+		if err := rows.Scan(&f.Path, &f.OriginalPath, &f.Hash, &f.URL, &f.Size, &modifiedStr); err != nil {
 			return nil, err
 		}
 		f.Modified, _ = time.Parse(time.RFC3339, modifiedStr)
@@ -324,53 +349,102 @@ func handlePUT(w http.ResponseWriter, r *http.Request, name string) {
 		http.Error(w, "Upload failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	info.Path = name
+
+	info.OriginalPath = name
+
+	// 🔑 关键修改：从 info.URL 提取 clean path 作为新的存储 path
+	var finalPath string
+	if u, err := url.Parse(info.URL); err == nil {
+		finalPath = strings.TrimPrefix(u.Path, "/")
+	} else {
+		// 如果解析失败，回退到原始 name
+		finalPath = strings.TrimPrefix(name, "/")
+	}
+
+	// 确保不为空
+	if finalPath == "" {
+		finalPath = filepath.Base(name)
+	}
+
+	info.Path = finalPath // 👈 使用 CDN 路径作为主键
 
 	if err := saveFile(info); err != nil {
 		http.Error(w, "Save to DB failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	fmt.Printf("[+] Uploaded: %s (hash: %s)\n", name, info.Hash)
+	fmt.Printf("[+] Uploaded: original=%s → stored as=%s (hash: %s)\n", name, finalPath, info.Hash)
 	w.WriteHeader(http.StatusCreated)
 }
 
-func handleDELETE(w http.ResponseWriter, r *http.Request, name string) {
-	if name == "" {
+func handleDELETE(w http.ResponseWriter, r *http.Request, inputPath string) {
+	if inputPath == "" {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
 	}
 
-	info, err := getFile(name)
+	var info *FileInfo
+	var err error
+	var deleteBy string // "path" or "original_path"
+
+	// 1️⃣ 先尝试按 CDN path (files.path) 查找
+	info, err = getFile(inputPath)
 	if err != nil {
 		http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	if info != nil {
+		deleteBy = "path"
+	} else {
+		// 2️⃣ 没找到？再按 original_path 查找
+		info, err = getFileByOriginalPath(inputPath)
+		if err != nil {
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if info != nil {
+			deleteBy = "original_path"
+		}
+	}
+
+	// ❌ 都没找到
 	if info == nil {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
 
-	if err := deleteFile(name); err != nil {
+	// 🗑️ 执行删除：根据匹配方式决定 WHERE 条件
+	var delErr error
+	if deleteBy == "path" {
+		_, delErr = db.Exec("DELETE FROM files WHERE path = ?", inputPath)
+	} else {
+		_, delErr = db.Exec("DELETE FROM files WHERE original_path = ?", inputPath)
+	}
+
+	if delErr != nil {
 		http.Error(w, "DB delete failed", http.StatusInternalServerError)
 		return
 	}
 
+	// 🌐 调用 sm.ms 删除（用 hash 即可，与路径无关）
 	if err := deleteFromSmms(info.Hash); err != nil {
-		fmt.Printf("[-] Delete warning: %v\n", err)
+		fmt.Printf("[-] Delete warning (sm.ms): %v\n", err)
 	}
-	fmt.Printf("[-] Deleted: %s\n", name)
+
+	fmt.Printf("[-] Deleted via %s: %s (hash: %s, original: %s)\n",
+		deleteBy, inputPath, info.Hash, info.OriginalPath)
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func handleGET(w http.ResponseWriter, r *http.Request, name string) {
-	if name == "" {
-		// Treat root GET as PROPFIND for compatibility
+func handleGET(w http.ResponseWriter, r *http.Request, originalPath string) {
+	if originalPath == "" {
 		handlePROPFIND(w, r, "")
 		return
 	}
 
-	info, err := getFile(name)
+	info, err := getFileByOriginalPath(originalPath)
 	if err != nil {
 		http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -391,7 +465,6 @@ func handlePROPFIND(w http.ResponseWriter, r *http.Request, name string) {
 			return
 		}
 
-		// 构造响应
 		responses := []PropfindResponseItem{
 			{
 				Href: "/",
@@ -400,7 +473,7 @@ func handlePROPFIND(w http.ResponseWriter, r *http.Request, name string) {
 						Resourcetype: &struct {
 							Collection *struct{} `xml:"D:collection,omitempty"`
 						}{
-							Collection: &struct{}{}, // 非 nil 表示是目录
+							Collection: &struct{}{},
 						},
 					},
 					Status: "HTTP/1.1 200 OK",
@@ -409,11 +482,13 @@ func handlePROPFIND(w http.ResponseWriter, r *http.Request, name string) {
 		}
 
 		for _, info := range files {
-			href := "/" + url.PathEscape(info.Path) // URL 编码路径
+			// ✅ 使用 original_path 构造 href（如果为空，回退到 path）
+			displayPath := info.OriginalPath
+			if displayPath == "" {
+				displayPath = info.Path
+			}
+			href := "/" + url.PathEscape(displayPath)
 			prop := Prop{
-				Resourcetype: &struct {
-					Collection *struct{} `xml:"D:collection,omitempty"`
-				}{}, // Collection 为 nil → 输出 <D:resourcetype/>
 				Getcontentlength: &info.Size,
 				Getlastmodified:  info.Modified.Format(time.RFC1123Z),
 			}
@@ -438,8 +513,8 @@ func handlePROPFIND(w http.ResponseWriter, r *http.Request, name string) {
 		return
 	}
 
-	// 单个文件 PROPFIND
-	info, err := getFile(name)
+	// 单个文件：按 original_path 查
+	info, err := getFileByOriginalPath(name)
 	if err != nil {
 		http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -449,11 +524,12 @@ func handlePROPFIND(w http.ResponseWriter, r *http.Request, name string) {
 		return
 	}
 
-	href := "/" + url.PathEscape(info.Path)
+	displayPath := info.OriginalPath
+	if displayPath == "" {
+		displayPath = info.Path
+	}
+	href := "/" + url.PathEscape(displayPath)
 	prop := Prop{
-		Resourcetype: &struct {
-			Collection *struct{} `xml:"D:collection,omitempty"`
-		}{}, // 文件无 collection
 		Getcontentlength: &info.Size,
 		Getlastmodified:  info.Modified.Format(time.RFC1123Z),
 	}
@@ -514,8 +590,49 @@ func main() {
 		webdavHandler(w, r)
 	}
 
+	http.HandleFunc("/api/get-url", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		originalPath := normalizePath(r.URL.Query().Get("path"))
+		if originalPath == "" {
+			http.Error(w, "Missing or invalid path", http.StatusBadRequest)
+			return
+		}
+
+		// 先按 original_path 查
+		info, err := getFileByOriginalPath(originalPath)
+		if err != nil {
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// 再按 CDN path 查（兼容）
+		if info == nil {
+			info, err = getFile(originalPath)
+			if err != nil {
+				http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		if info == nil {
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
+
+		// ✅ 返回 JSON，但 "url" 字段是 CDN 路径（info.Path）
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(map[string]string{
+			"url": info.Path, // 👈 关键：用 Path 而不是 URL
+		})
+	})
+
 	http.HandleFunc("/", authHandler)
 	if err := http.ListenAndServe(":"+config.Port, nil); err != nil {
 		fmt.Printf("💥 Server failed: %v\n", err)
 	}
+
 }
