@@ -22,9 +22,9 @@ import (
 const (
 	DB_FILE       = "smms.db"
 	CONFIG_FILE   = "config.json"
-	SMMS_UPLOAD   = "https://smms.app/api/v2/upload"
-	SMMS_DELETE   = "https://smms.app/api/v2/delete/"
-	MAX_FILE_SIZE = 10 * 1024 * 1024 // 10MB
+	SMMS_UPLOAD   = "https://s.ee/api/v1/file/upload"
+	SMMS_DELETE   = "https://s.ee/api/v1/file/delete/"
+	MAX_FILE_SIZE = 20 * 1024 * 1024 // 20MB
 )
 
 type Config struct {
@@ -205,13 +205,13 @@ func uploadToSmms(filename string, content []byte) (*FileInfo, error) {
 	}
 
 	var result struct {
-		Success bool      `json:"success"`
 		Data    SmmsImage `json:"data"`
 		Message string    `json:"message"`
+		Code    int       `json:"code"`
 	}
 	json.Unmarshal(resp.Body(), &result)
 
-	if !result.Success {
+	if result.Code != 200 {
 		if strings.Contains(result.Message, "Image exists") {
 			return nil, fmt.Errorf("file already exists on sm.ms (duplicate content)")
 		}
