@@ -1,6 +1,6 @@
-# 📁 SMMS-WebDav
+# 📁 S.EE WebDav
 
-> 将 [sm.ms](https://sm.ms) 图床伪装成 WebDAV 存储服务 —— 支持 AList、RaiDrive、Windows/macOS 挂载！
+> 将 [s.ee](https://s.ee) (原 [sm.ms](https://sm.ms)) 图床伪装成 WebDAV 存储服务 —— 支持 AList、RaiDrive、Windows/macOS 挂载！
 
 [![Go](https://img.shields.io/badge/Go-1.20%2B-blue?logo=go)](https://golang.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
